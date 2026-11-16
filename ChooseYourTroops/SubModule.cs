@@ -44,6 +44,41 @@ public class ChooseYourTroopsBehavior : CampaignBehaviorBase
 
     public static bool OnNavalMapEvent => MapEvent.PlayerMapEvent?.IsNavalMapEvent == true;
 
+    public ChooseYourTroopsBehavior()
+    {
+        // The state is static, so it survives loading another save or starting a new game in the same session.
+        // The behavior is created before the save data is loaded (SyncData), so clearing it here is safe.
+        ResetState();
+    }
+
+    private static void ResetState()
+    {
+        EncounterGameMenuBehavior.MapEventSidePatches.Reset();
+        _actualTroopRoster = null;
+        _playerSide = BattleSideEnum.None;
+        _setupSide = false;
+        _haveChosenTroops = false;
+        _playerArmySize = 0;
+        _enemyArmySize = 0;
+        _initialPlayerSpawn = 0;
+    }
+
+    /** Only the selected roster is saved: restore the rest of the selection state that goes with it */
+    private static void OnGameLoadFinished()
+    {
+        CheckTroopRoster();
+
+        if (_actualTroopRoster == null || _actualTroopRoster.TotalHealthyCount <= 0)
+            return;
+
+        _haveChosenTroops = true;
+        _initialPlayerSpawn = _actualTroopRoster.TotalHealthyCount;
+
+        var battlePlayerSide = PlayerEncounter.Battle?.PlayerSide ?? BattleSideEnum.None;
+        if (battlePlayerSide is BattleSideEnum.Defender or BattleSideEnum.Attacker)
+            _playerSide = battlePlayerSide;
+    }
+
     public override void RegisterEvents()
     {
         CampaignEvents.OnMissionEndedEvent.AddNonSerializedListener(this, (IMission mission) =>
@@ -51,7 +86,7 @@ public class ChooseYourTroopsBehavior : CampaignBehaviorBase
             CheckTroopRoster();
             EncounterGameMenuBehavior.MapEventSidePatches.Reset();
         });
-        CampaignEvents.OnGameLoadFinishedEvent.AddNonSerializedListener(this, CheckTroopRoster);
+        CampaignEvents.OnGameLoadFinishedEvent.AddNonSerializedListener(this, OnGameLoadFinished);
         CampaignEvents.OnAfterSessionLaunchedEvent.AddNonSerializedListener(this, AddGamesMenu);
         CampaignEvents.OnPartySizeChangedEvent.AddNonSerializedListener(this, (PartyBase party) =>
         {
@@ -78,6 +113,11 @@ public class ChooseYourTroopsBehavior : CampaignBehaviorBase
     {
         var playerTroopRoster = MobileParty.MainParty.MemberRoster;
 
+        // _playerSide is static and not saved: right after loading a save it is None (-1) and
+        // PartiesOnSide(None) throws IndexOutOfRangeException. The map event knows the player's side.
+        var battlePlayerSide = PlayerEncounter.Battle?.PlayerSide ?? _playerSide;
+        var hasValidBattleSide = battlePlayerSide is BattleSideEnum.Defender or BattleSideEnum.Attacker;
+
         if (MobileParty.MainParty.Army != null &&
             MobileParty.MainParty.Army.LeaderParty == MobileParty.MainParty)
         {
@@ -92,16 +132,16 @@ public class ChooseYourTroopsBehavior : CampaignBehaviorBase
                 playerTroopRoster.Add(party.MemberRoster);
             }
         }
-        else if ((PlayerEncounter.Battle != null &&
-                  PlayerEncounter.Battle.PartiesOnSide(_playerSide).Count > 1) ||
+        else if ((PlayerEncounter.Battle != null && hasValidBattleSide &&
+                  PlayerEncounter.Battle.PartiesOnSide(battlePlayerSide).Count > 1) ||
                  (PlayerSiege.BesiegedSettlement != null &&
                   PlayerSiege.PlayerSiegeEvent.GetSiegeEventSide(PlayerSiege.PlayerSide)
                       .GetInvolvedPartiesForEventType().Count() > 1 && MobileParty.MainParty.Army == null))
         {
             playerTroopRoster = TroopRoster.CreateDummyTroopRoster();
 
-            var partiesOnPlayerSide = PlayerEncounter.Battle != null
-                ? PlayerEncounter.Battle.PartiesOnSide(_playerSide).Select(x => x.Party).ToList()
+            var partiesOnPlayerSide = PlayerEncounter.Battle != null && hasValidBattleSide
+                ? PlayerEncounter.Battle.PartiesOnSide(battlePlayerSide).Select(x => x.Party).ToList()
                 : PlayerSiege.PlayerSiegeEvent.GetSiegeEventSide(PlayerSiege.PlayerSide)
                     .GetInvolvedPartiesForEventType().ToList();
 
@@ -221,8 +261,21 @@ public class ChooseYourTroopsBehavior : CampaignBehaviorBase
                     maxInitialPlayerTroops = ChooseYourTroopsConfig.CurrentBattleSizeLimit / 2;
             }
 
-        var armyRoster = GetCurrentPlayerTroopRoster();
+        OpenTroopsSelector(args, maxInitialPlayerTroops, GetCurrentPlayerTroopRoster());
+    }
 
+    /**
+     * Used by naval battles (ChooseYourTroopsWS): the limit comes from the crew capacity of the player team's ships
+     * instead of the battle size, and only the player team's troops are listed (the ally team has its own ships).
+     */
+    public static void OpenNavalTroopsSelector(MenuCallbackArgs args, int maxPlayerTeamTroops, TroopRoster playerTeamRoster)
+    {
+        CheckTroopRoster();
+        OpenTroopsSelector(args, maxPlayerTeamTroops, playerTeamRoster);
+    }
+
+    private static void OpenTroopsSelector(MenuCallbackArgs args, int maxInitialPlayerTroops, TroopRoster armyRoster)
+    {
         _initialPlayerSpawn = maxInitialPlayerTroops;
 
         // First gets only the healthy and not hero troops
@@ -393,14 +446,7 @@ public class ChooseYourTroopsBehavior : CampaignBehaviorBase
         [HarmonyPrefix]
         private static void Prefix()
         {
-            EncounterGameMenuBehavior.MapEventSidePatches.Reset();
-            _actualTroopRoster = null;
-            _playerSide = BattleSideEnum.None;
-            _setupSide = false;
-            _haveChosenTroops = false;
-            _playerArmySize = 0;
-            _enemyArmySize = 0;
-            _initialPlayerSpawn = 0;
+            ResetState();
         }
     }
 
